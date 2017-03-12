@@ -34,13 +34,29 @@ If you plan on using this, be aware of some security considerations:
 		
 * It is simply a very cheap means of using 'posession' of a removable drive
   to make decisions and take actions. 
-* It is assumed(VERY IMPORTANT) that everyone that is able to send traffic to the 
+* It is assumed(**VERY IMPORTANT**) that everyone that is able to send traffic to the 
   'multi cast'(or set via -d) IP address and port is trusted otherwise they call tell all listeners
   to lock or unlock at will which makes this whole thing pointless 
-  (when in doubt use 127.0.0.1 and drop the udp port on ingress points to the trusted network)
+  (when in doubt use 127.0.0.1 which is the default and drop the udp port on ingress points to the trusted network)
 		
 * If you can't ensure physhical posession by you and only after this application is 'active'
   it is of no use to you.
 		
 * Lastly, udev notifications aren't all that reliable,so plugging in/out a few times might be needed.
-		
+
+As an example client,The slock/ directory contains a heavily modified slock() that can be used with usbnonce.
+Simply run both applications,insert a usb,when removed it should lock the screen. It will require the same removable 
+drive to be re-inserted before you can type in your credentials for unlocking the screen. 
+
+#Usage
+
+```		
+USBnonce 0.1a Usage:
+
+	usbnonce [-mfdph]
+	-m <mountpoint>	 set the filesystem mount point that will be used to temporarily mount the removable drive.
+	-f <filesystem>	 set the filesystem the removable drive is expected to use.
+	-d <ipv4addr>	 set the destination IPv4 address for UDP notifications
+	-p <port>	 set the destination port number for UDP notifications.
+	-h 	 Display this usage info.
+```
