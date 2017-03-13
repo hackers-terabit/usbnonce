@@ -16,6 +16,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
+#include <pthread.h>
 
 #include <arpa/inet.h>
 #include <linux/in.h>
@@ -31,6 +32,7 @@
 #include "util.h"
 
 char *argv0;
+char message[64];
 
 enum {
 	INIT,
@@ -45,6 +47,7 @@ struct lock {
 	int screen;
 	Window root, win;
 	Pixmap pmap;
+	Display *dpy;
 	unsigned long colors[NUMCOLS];
 };
 
@@ -149,8 +152,12 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 	running = 1;
 	failure = 0;
 	oldc = INIT;
-
+	snprintf(message,64,"USB nonce is good. Please proceed with entering your login password.");
+	XFlush(dpy);
 	while (running && !XNextEvent(dpy, &ev)) {
+		for (screen = 0; screen < nscreens; screen++) {
+			XDrawString(locks[screen]->dpy,locks[screen]->win,DefaultGC(dpy,screen),400,800,message,strlen(message));
+		}
 		if (ev.type == KeyPress) {
 			explicit_bzero(&buf, sizeof(buf));
 			num = XLookupString(&ev.xkey, buf, sizeof(buf), &ksym, 0);
@@ -204,6 +211,10 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 					                     locks[screen]->win,
 					                     locks[screen]->colors[color]);
 					XClearWindow(dpy, locks[screen]->win);
+					if(color==FAILED)
+						snprintf(message,64,"Incorrect password,please try again.");
+					XDrawString(locks[screen]->dpy,locks[screen]->win,DefaultGC(dpy,screen),400,800,message,strlen(message));
+					
 				}
 				oldc = color;
 			}
@@ -221,10 +232,12 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 					XClearWindow(dpy, locks[screen]->win);
 					break;
 				}
+			 
 			}
 		} else {
 			for (screen = 0; screen < nscreens; screen++)
 				XRaiseWindow(dpy, locks[screen]->win);
+				
 		}
 	}
 }
@@ -270,7 +283,7 @@ lockscreen(Display *dpy, struct xrandr *rr, int screen)
 	                     lock->win,
 	                     lock->colors[USBWAIT]);
 	XClearWindow(dpy, lock->win);
-	
+	XFlush(dpy);
 	/* Try to grab mouse pointer *and* keyboard for 600ms, else fail the lock */
 	for (i = 0, ptgrab = kbgrab = -1; i < 6; i++) {
 		if (ptgrab != GrabSuccess) {
@@ -316,10 +329,12 @@ lockscreen(Display *dpy, struct xrandr *rr, int screen)
 }
 struct usnudp{
 	struct sockaddr_in srv,clnt;
+	struct lock **locks;
 	int sk;
+	int nscreens;
 };
 
-void usbnonce_init(struct usnudp *usu){
+static void usbnonce_init(struct usnudp *usu){
 		
 	memset(usu,0,sizeof(struct usnudp));
 	memset(&usu->srv,0,sizeof(struct sockaddr_in));
@@ -341,7 +356,7 @@ void usbnonce_init(struct usnudp *usu){
 		exit(1);
 	}
 }
-int usbnonce(struct usnudp *usu){
+inline int usbnonce(struct usnudp *usu){
 	
 	int ret;
 	socklen_t clen=sizeof(usu->clnt);
@@ -355,6 +370,7 @@ int usbnonce(struct usnudp *usu){
 	printf("Awaiting USBnonce notification...\n");
 	fflush(stdout);
 	while(1){
+		
 		ret=recvfrom(usu->sk,buf,32,0,(struct sockaddr *) &usu->clnt,&clen);
 		if(ret<1){
 			perror("recvfrom error");
@@ -371,6 +387,8 @@ int usbnonce(struct usnudp *usu){
 		}
 	}	
 }
+
+
 
 static void
 usage(void)
@@ -485,10 +503,20 @@ main(int argc, char **argv) {
 					_exit(1);
 				}
 			}
-			
-		
+			for (screen = 0; screen < nscreens; screen++) {
+				locks[screen]->dpy=dpy;
+			}
+			usu.locks=locks;
+			usu.nscreens=nscreens;
+			snprintf(message,64,"Insert removable drive");
 			printf("Screen should be locked now,awaiting usb re-insertion before accepting password...\n");
 			/* everything is now blank. Wait for the correct password */
+			for (screen = 0; screen < nscreens; screen++) {
+				XDrawString(locks[screen]->dpy,locks[screen]->win,DefaultGC(dpy,screen),400,800,message,strlen(message)); 
+				XFlush(locks[screen]->dpy);
+
+			}
+		
 			while(usblock){
 				
 				
@@ -496,8 +524,9 @@ main(int argc, char **argv) {
 				
 				usblock=usbnonce(&usu);
 				
-				if(!usblock)
+				if(!usblock){
 					readpw(dpy, &rr, locks, nscreens, hash);
+				}
 				else if(usblock==-1){
 					printf("USB nonce token failed to verify!!\n");
 					
@@ -506,8 +535,6 @@ main(int argc, char **argv) {
 												locks[screen]->win,
 												locks[screen]->colors[USBFAIL]);
 							XClearWindow(dpy, locks[screen]->win);
-							XDrawString(dpy,locks[screen]->win,DefaultGC(dpy,screen),0,0,"Insert USB",strlen("Insert USB"));                     
-							
 							XSync(dpy, 0);
 							usleep(1000);	
 						}

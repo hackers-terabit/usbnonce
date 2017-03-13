@@ -46,9 +46,6 @@
  * ********************************************************************************************/
 #define _GNU_SOURCE
 
-#define NSZ 512 
-
-
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -66,7 +63,8 @@
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/syscall.h>
-
+#include <syslog.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <linux/in.h>
@@ -76,13 +74,19 @@ struct shared{
 	char *mountpath; 		/* temporary mount path, should be unmouted after nonce is written */
 	char *fstype;			/* the fs of the removable drive */
 	char *multicast_addr; 	/* the IPv4 multicast address to send UDP event notification to */
-	uint16_t port;  		/* the UDP destination port for notification messages */
-	
+	char devp[12];			/* typically /dev , the path to the devfs mount path */
+
 	char * NOTREADY;		/* hasn't finished starting up yet */
 	char * LOCKREADY; 		/* nonce is synced, awaiting device removal to lock/activate */
 	char * LOCK;			/* device removed after LOCKREADY,system is good to lock */
 	char * UNLOCKREADY;		/* good nonce read on device plug in while system was in an active/locked state */
 	char * UNLOCKFAIL; 		/* failed to read a good nonce while in sync, not a bad thing unless system was locked/active */
+	
+	uint16_t port;  		/* the UDP destination port for notification messages */
+	uint32_t nsz;			/* byte count of the random bytes to be used as a 'nonce' */
+	uint8_t background;		/* fork */
+	uint8_t running;
+	
 } g;
 
 struct noncesync{
@@ -91,7 +95,7 @@ struct noncesync{
 	uint8_t gone;		/* drive and/or partition removed */
 	uint8_t sync;		/* nonce written */
 	uint8_t active; 	/* drive removed after a good sync */
-	uint8_t nonce[NSZ]; /* should hold random bytes */
+	uint8_t *nonce; /* should hold random bytes */
 	
 	char partition_device[32];   	/* usable/writable partition like 'sda1' */
 	char parent_device[32];			/* this would be the device the partition above lies on,as in 'sda' */
@@ -112,63 +116,68 @@ struct mcast{
 	struct sockaddr_in d;
 };
 
-int poprand(char *buf,int sz){
+inline int poprand(char *buf,int sz){
 	int ret=0;
 	FILE *rf;
 	do{
 		rf=fopen("/dev/urandom","r");
 		if(rf==NULL){
-			perror("Unable to open /dev/random\n");
+			syslog(LOG_CRIT,"Unable to open /dev/urandom %s",strerror(errno));
 			return -1;
 		}
 		
-		ret= fread(buf,1,sz,rf);//linker errors on 4.4.8 :( --->getrandom((void *) buf,NSZ,GRND_RANDOM);
+		ret= fread(buf,1,sz,rf);//linker errors on 4.4.8 :( --->getrandom((void *) buf,g.nsz,GRND_RANDOM);
 		if(ret==-1){
-			perror("poprandom error");
+			syslog(LOG_CRIT,"poprandom error %s",strerror(errno));
 			return -1;
 		}
-		if(ret<NSZ){
-			printf("Not enough random bytes, trying again...");
+		if(ret<g.nsz){
+			syslog(LOG_ERR,"Not enough random bytes, trying again...");
 		}else{
 			return 0;
 		}
-	usleep(500);	
-	}while(ret<NSZ);
+		usleep(500);	
+		fclose(rf);
+	}while(ret<g.nsz);
 	
 	return -1;	
 }
 
-int init_udev(struct noncesync *n){
+
+
+static int init_udev(struct noncesync *n){
 	n->u=udev_new();
 	n->ue=udev_enumerate_new(n->u);
 	n->uq=udev_queue_new(n->u);
 	
 	if(udev_enumerate_add_match_subsystem(n->ue,"block")<0){
-		perror("udev_enumerate_add_match_subsystem error.");
+		syslog(LOG_CRIT,"udev_enumerate_add_match_subsystem error %s",strerror(errno));
 	}
 	
 	
 	if(!n->u){
-		perror("Error getting a udev handle.");
+		syslog(LOG_CRIT,"Error getting a udev handle %s",strerror(errno));
 		return -1;
 	}
 	
 	n->um=udev_monitor_new_from_netlink(n->u,"udev");
 	if(n->um==NULL){
-		perror("udev_monitor_new_from_netlink error");
+		syslog(LOG_CRIT,"udev_monitor_new_from_netlink error %s",strerror(errno));
 		return -1;
 	}
 	if(udev_monitor_filter_add_match_subsystem_devtype(n->um,"block",NULL)<0){
-		perror("udev_monitor_filter_add_match_subsystem_devtype error");
+		syslog(LOG_CRIT,"udev_monitor_filter_add_match_subsystem_devtype error %s",strerror(errno));
 		return -1;
 	}
 	if(udev_monitor_enable_receiving(n->um)<0){
-		perror("udev_monitor_enable_receiving error.");
+		syslog(LOG_CRIT,"udev_monitor_enable_receiving error %s",strerror(errno));
 		return -1;
 	}
 	n->ufd=udev_monitor_get_fd(n->um);
 	
-
+	/* snprintf(g.devp,12,"%s", udev_get_dev_path(n->u)); <-- would be nice right? 'systemd'-udev removed it :/ */
+	snprintf(g.devp,12,"/dev"); 
+	
 return 0;	
 }
 void monitor(struct noncesync *n){
@@ -179,26 +188,25 @@ void monitor(struct noncesync *n){
 	char action[32],removable[10],readonly[10],partition[10];
 	
 	n->mountme=0;
-	
-	
-	
 
 	pfd.fd=n->ufd;
+	
 	if(pfd.fd<1){
-		perror("udev_monitor_get_fd error.");
+		syslog(LOG_ERR,"udev_monitor_get_fd error %s",strerror(errno));
 		return ;
 	}
+	
 	pfd.events=POLLIN;
 
 
 	while(!udev_queue_get_queue_is_empty(n->uq)){
 		ret=poll(&pfd,1,-1);
 		if (ret<0){
-			perror("Poll error.");
+			syslog(LOG_ERR,"Poll error %s",strerror(errno));
 		}else{
 			n->ud=udev_monitor_receive_device(n->um);
 			if(n->ud==NULL){
-				perror("udev_monitor_receive_device error.");
+				syslog(LOG_ERR,"udev_monitor_receive_device error. %s",strerror(errno));
 				return;
 			}
 			
@@ -212,12 +220,12 @@ void monitor(struct noncesync *n){
 			snprintf(partition,5,"%s",udev_device_get_sysattr_value(n->ud,"partition"));
 			
 			if(strncmp(action,"add",3)==0 &&  strncmp(partition,"1",1)!=0 && strncmp(removable,"1",1)==0 && strncmp(readonly,"0",1)==0){ //parent block , like /dev/sda
-					printf("---------------------------------\n");
-					printf("New removable drive added on /dev/%s\n",sysname);
-					printf("Dev path: %s\n",devpath);
-					printf("Action: %s\n",action);
-					printf("Readonly: %s\n",readonly);
-					printf("Removable: %s\n",removable);
+					syslog(LOG_INFO,"---------------------------------\n");
+					syslog(LOG_NOTICE,"New removable drive added on %s/%s\n",g.devp,sysname);
+					syslog(LOG_INFO,"Dev path: %s\n",devpath);
+					syslog(LOG_INFO,"Action: %s\n",action);
+					syslog(LOG_INFO,"Readonly: %s\n",readonly);
+					syslog(LOG_INFO,"Removable: %s\n",removable);
 					
 					snprintf(n->parent_device,32,"%s",sysname);
 					snprintf(n->parent_devpath,256,"%s",devpath);		
@@ -229,13 +237,13 @@ void monitor(struct noncesync *n){
 				if (parent==NULL)return;
 				udev_enumerate_scan_devices(n->ue);
 				if(strncmp(n->parent_devpath,udev_device_get_devpath(parent),32)==0){
-					printf("---------------------------------\n");
-					printf("New partition added on /dev/%s\n",sysname);
-					printf("Dev path: %s\n",devpath);
-					printf("Action: %s\n",action);
-					printf("Readonly: %s\n",readonly);
-					printf("Partition: %s\n",partition);
-					printf("Parent device: /dev/%s\n",udev_device_get_sysname(parent));
+					syslog(LOG_INFO,"---------------------------------\n");
+					syslog(LOG_NOTICE,"New partition added on %s/%s\n",g.devp,sysname);
+					syslog(LOG_INFO,"Dev path: %s\n",devpath);
+					syslog(LOG_INFO,"Action: %s\n",action);
+					syslog(LOG_INFO,"Readonly: %s\n",readonly);
+					syslog(LOG_INFO,"Partition: %s\n",partition);
+					syslog(LOG_INFO,"Parent device: %s/%s\n",g.devp,udev_device_get_sysname(parent));
 					snprintf(n->partition_device,32,"%s",sysname);
 					snprintf(n->partition_devpath,256,"%s",devpath);
 					n->mountme=1;
@@ -245,50 +253,50 @@ void monitor(struct noncesync *n){
 	
 			}else if(strncmp(action,"remove",6)==0){
 				udev_enumerate_scan_devices(n->ue);
-				printf("removed %s\n",sysname);
+				syslog(LOG_NOTICE,"removed %s\n",sysname);
 				struct udev_device *parent=udev_device_get_parent(n->ud);
 				if((!n->gone )&& ((strncmp(udev_device_get_sysname(parent),n->parent_device,32)==0 && strncmp(udev_device_get_devpath(parent),n->parent_devpath,255)==0 ) ||
 									(strncmp(sysname,n->partition_device,32)==0 && strncmp(devpath,n->partition_devpath,255)==0 ) ||
 									(strncmp(sysname,n->parent_device,32)==0 && strncmp(devpath,n->parent_devpath,255)==0 )
 									)){
-					printf("---------------------------------\n");
-					printf("Previously detected device removed /dev/%s\n",sysname);
-					printf("Parent device: /dev/%s\n",n->parent_device);
-					printf("Parent device path: %s\n",n->parent_devpath);
-					printf("Partition device: /dev/%s\n",n->partition_device);
-					printf("Partition device path: %s\n",n->parent_devpath);
-					printf("Action: %s\n",action);
+					syslog(LOG_INFO,"---------------------------------\n");
+					syslog(LOG_NOTICE,"Previously detected device removed %s/%s\n",g.devp,sysname);
+					syslog(LOG_INFO,"Parent device: %s/%s\n",g.devp,n->parent_device);
+					syslog(LOG_INFO,"Parent device path: %s\n",n->parent_devpath);
+					syslog(LOG_INFO,"Partition device: %s/%s\n",g.devp,n->partition_device);
+					syslog(LOG_INFO,"Partition device path: %s\n",n->parent_devpath);
+					syslog(LOG_INFO,"Action: %s\n",action);
 					n->gone=1;
 					n->mountme=0;
 					return;
 			}else{
 					
-					printf("---------------------------------\n");
-					printf("[%i] Uncaught device removal:/dev/%s ,parent %s,child\n",n->gone,sysname,udev_device_get_sysnum(parent));
-					printf("device removed /dev/%s\n",sysname);
-					printf("device removed path %s\n",devpath);
-					printf("Action: %s\n",action);
-					printf("In sync for active device:/dev/%s\n",n->parent_device);
-					printf("In sync for partition:/dev/%s\n",n->partition_device);
+					syslog(LOG_INFO,"---------------------------------\n");
+					syslog(LOG_INFO,"[%i] Uncaught device removal:/dev/%s ,parent %s,child\n",n->gone,sysname,udev_device_get_sysnum(parent));
+					syslog(LOG_INFO,"device removed %s/%s\n",g.devp,sysname);
+					syslog(LOG_INFO,"device removed path %s\n",devpath);
+					syslog(LOG_INFO,"Action: %s\n",action);
+					syslog(LOG_INFO,"In sync for active device:%s/%s\n",g.devp,n->parent_device);
+					syslog(LOG_INFO,"In sync for partition:%s/%s\n",g.devp,n->partition_device);
 			}
 			}
 		}
 	}
 }
 
-int multicast(const char*buf,int sz,struct mcast* mc){
+static int multicast(const char*buf,int sz,struct mcast* mc){
 	int ret;
 	if(sz>256)
 		sz=256;
 	if(sz<0)
 		sz=0;
 		
-	unsigned char sendbuf[256];
+	uint8_t sendbuf[256];
 	memset(sendbuf,0,256);
 	memcpy(sendbuf,buf,sz);
 	ret=sendto(mc->sk,sendbuf,sz,0,(struct sockaddr *) &mc->d, sizeof(struct sockaddr_in));
 	if(ret <0){
-		perror("sendto error");
+		syslog(LOG_ERR,"sendto error %s",strerror(errno));
 		return -1;
 	}else{
 		return ret;
@@ -296,7 +304,7 @@ int multicast(const char*buf,int sz,struct mcast* mc){
 	return -1;
 }
 
-void drop_privs () {
+static void init_seccomp () {
      int ret = 0;
      /*if( setgid (65533) ||setuid (65534) ){  :( mount(2) won't work if I do this.
 		perror("Failure to drop priviledge using setgid/setuid\r\n");
@@ -343,27 +351,200 @@ void drop_privs () {
 	ret += seccomp_rule_add (ctx, SCMP_ACT_ALLOW, SCMP_SYS (seccomp), 0);
      ret = seccomp_load (ctx);
      if (ret < 0){
-          perror("Error loading SECCOMP!");
-          exit(1);
+          syslog(LOG_ALERT,"Error loading SECCOMP!");
+          _exit(1);
 	  }
      seccomp_release (ctx);
 
 }
+void signals (int signal) {
 
+     switch (signal) {
+     case SIGSEGV:
+          syslog(LOG_ALERT,"CAUGHT A SEGMENTATION FAULT");
+
+          break;
+     case SIGKILL:
+          syslog(LOG_CRIT,"SIGKILL CAUGHT,EXITING");
+          break;
+
+     case SIGTERM:
+          syslog(LOG_NOTICE,"SIGTERM received. proceeding with normal termination.");
+          g.running=0;
+          break;
+     case SIGTTOU:
+     case SIGPROF:
+          syslog(LOG_INFO,"Profiling has started");
+          break;
+     case 33:
+          break;
+     default:
+          syslog(LOG_CRIT,"Uncaught signal!");
+          return;
+          break;
+     }
+}
 
 void usage(){
-		printf("%s Usage:\n"
+		 printf("%s Usage:\n"
 				"\tusbnonce [-mfdph]\n"
 				"\t-m <mountpoint>\t set the filesystem mount point that will be used to temporarily mount the removable drive.\n"
 				"\t-f <filesystem>\t set the filesystem the removable drive is expected to use.\n"
+				"\t-F \t Don't fork,run as a foreground process.\n"
 				"\t-d <ipv4addr>\t set the destination IPv4 address for UDP notifications\n"
 				"\t-p <port>\t set the destination port number for UDP notifications.\n"
 				"\t-h \t Display this usage info.\n"
 				,g.version);
-				exit(1);
+				_exit(1);
+}
+static int event_loop(){
+	
+	struct noncesync n;
+	struct mcast mc;
+	char nonce[g.nsz];
+
+	memset(&n,0,sizeof(n));
+	memset(&mc,0,sizeof(struct mcast));
+	n.nonce=alloca(g.nsz);
+	/* initialize udev handler */ 
+	if(init_udev(&n)!=0){
+		syslog(LOG_CRIT,"Udev init error!");
+		return 1;
+		
+	}
+	
+	mc.d.sin_family=AF_INET;
+	htonl(inet_aton(g.multicast_addr,&mc.d.sin_addr));
+	mc.d.sin_port=htons(g.port);
+	
+	mc.sk=socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP);
+	if(mc.sk<1){
+		syslog(LOG_ERR,"Socket creation error,exiting %s ",strerror(errno));
+		return -1;
+		}
+		
+	multicast(g.NOTREADY,strlen(g.NOTREADY),&mc);
+	syslog(LOG_NOTICE,"Socket init done");
+							
+	while(g.running){
+		usleep(100);
+		monitor(&n);
+		if(n.mountme){
+			char pdev[256];
+			snprintf(pdev,255,"%s/%s",g.devp,n.partition_device);
+			if(mkdir(g.mountpath,0644)!=0 && errno!=EEXIST){
+				syslog(LOG_WARNING,"Warning,mkdir error,mount might fail %s ",strerror(errno));
+			}
+			if((mount(pdev,g.mountpath,g.fstype,MS_MGC_VAL,NULL))!=0){
+				syslog(LOG_ERR,"Mount params: %s %s %s ...\n",pdev,g.mountpath,g.fstype);
+				syslog(LOG_ERR,"Error mounting the newly detected device %s ",strerror(errno));
+				continue;
+			}else{
+				syslog(LOG_NOTICE,"Mount successful %s ---> %s\n",pdev,g.mountpath);
+				memset(nonce,0,g.nsz);
+				if(poprand(&nonce[0],g.nsz)==0){
+					char nfile[256];
+					snprintf(nfile,256,"%s/.nonce",g.mountpath);
+					FILE *nf=fopen(nfile,"rw+");
+					if(nf==NULL){
+						syslog(LOG_ERR,"Error opening nonce file %s ",strerror(errno));
+						syslog(LOG_ERR,"File:%s\n",nfile);
+						if(n.sync && n.active){
+							syslog(LOG_ERR,"UNLOCKFAIL ");
+							multicast(g.UNLOCKFAIL,strlen(g.UNLOCKFAIL),&mc);
+						
+					}
+					umount(g.mountpath);
+						continue;
+					}else if(!n.sync){
+						if(fwrite(nonce,1,g.nsz,nf)!=g.nsz){
+							perror("Error writing out nonce");
+							fclose(nf);
+							umount(g.mountpath);
+							continue;
+					}else{
+						memset(n.nonce,0,g.nsz);
+						memcpy(n.nonce,nonce,g.nsz);
+						n.sync=1;
+						syslog(LOG_ERR,"Nonce written,synced.");
+						multicast(g.LOCKREADY,strlen(g.LOCKREADY),&mc);
+						fflush(nf);
+						fclose(nf);
+						umount(g.mountpath);
+					}
+					
+				}else if(n.sync==1){
+					int ret=fread(nonce,1,g.nsz,nf);
+					if( ret!= g.nsz && n.active){
+						syslog(LOG_INFO,"error reading nonce from usb, True negative!");
+						syslog(LOG_ERR,"nonce read %i bytes %s",ret,strerror(errno));
+						
+						multicast(g.UNLOCKFAIL,strlen(g.UNLOCKFAIL),&mc);
+						
+						fclose(nf);
+						umount(g.mountpath);
+						
+						continue;
+					}else{
+						if(memcmp(nonce,n.nonce,g.nsz)==0){ // This is where we authenticate,no other logic should result in a True positive(successful authentication).
+							syslog(LOG_NOTICE,"True positive,unlock!\n");
+							
+							multicast(g.UNLOCKREADY,strlen(g.UNLOCKREADY),&mc);
+							n.active=0;
+							n.sync=0;
+							memset(n.nonce,0,g.nsz);
+							memset(nonce,0,g.nsz);
+							if(fseek(nf,0,SEEK_SET)!=0){
+								syslog(LOG_WARNING,"Warning! fseek on nonce failed post successful authentication,next nonce might fail.");
+							}
+							if(poprand(&nonce[0],g.nsz)==0){
+								if(fwrite(nonce,1,g.nsz,nf)!=g.nsz){
+									syslog(LOG_ERR,"Error writing out nonce at post successful authentication. %s",strerror(errno));
+									umount(g.mountpath);
+									fclose(nf);
+									continue;
+								}else{
+									memcpy(n.nonce,nonce,g.nsz);
+									n.sync=1;
+									syslog(LOG_INFO,"Nonce written,nonce synced\n");
+									multicast(g.LOCKREADY,strlen(g.LOCKREADY),&mc);
+									fflush(nf);
+									fclose(nf);
+								}	
+							}else{
+								syslog(LOG_CRIT,"RNG error post successful authentication.\n");
+								}
+						}else{
+							syslog(LOG_ALERT,"True negative!\n");
+							multicast(g.UNLOCKFAIL,strlen(g.UNLOCKFAIL),&mc);
+						}
+					}
+					
+					
+				}
+			}else{
+				syslog(LOG_CRIT,"RNG error.\n");
+				umount(g.mountpath);
+				continue;
+				}
+			umount(g.mountpath);
+			}
+		}else if(n.gone){
+			
+		if(n.sync && !(n.active)){
+			syslog(LOG_NOTICE,"LOCK\n");
+			n.active=1;
+			multicast(g.LOCK,strlen(g.LOCK),&mc);
+				}
+		}	
+	}
+	close(mc.sk);	
+	return 0;
 }
 
 int main(int argc,char **argv){
+	
+	int c=0;
 	
 	/*setup shared variables/globals..*/
 	g.version="USBnonce 0.1a";
@@ -377,21 +558,14 @@ int main(int argc,char **argv){
 	g.UNLOCKREADY="UNLOCKREADY";	
 	g.UNLOCKFAIL="FAILUNLOCK"; 
 	g.LOCK="LOCK";
+	g.nsz=512; /*512 random bytes for nonce */
+	g.background=1;
 	
-	
-	
-	struct noncesync n;
-	char nonce[NSZ];
-
+	openlog("USBNONCE",LOG_CONS|LOG_NDELAY|LOG_PERROR|LOG_PID|LOG_NOWAIT,LOG_AUTH);
+	/* this was used to prevent buffered terminal output,not needed now but keeping it anyway*/
 	setvbuf(stdout,NULL,_IONBF,0);
-	memset(&n,0,sizeof(n));
 	
-	struct mcast mc;
-	memset(&mc,0,sizeof(struct mcast));
-	
-	int c=0;
-	
-	while((c=getopt(argc,argv,"m:f:d:p:h"))!=-1){
+	while((c=getopt(argc,argv,"m:f:d:p:Fh"))!=-1){
 			switch(c){
 				case 'm':
 					g.mountpath=optarg;
@@ -405,155 +579,38 @@ int main(int argc,char **argv){
 				case 'p':
 					g.port=atoi(optarg);
 					break;
+				case 'F':
+					g.background=0;
+					break;
 				case 'h':
 				default:
 					usage();
 				}
 	}
 	
-	
-	
-	if(init_udev(&n)!=0){
-		printf("Udev init error!");
-		return 1;
+	if(g.background && !fork()){
+		/* setup a signal handler */
+		for (c = 0; c < 32; c++)
+			signal (c, signals);
+		/* Initialize seccomp */      
+		init_seccomp();
+		g.running=1;
+		/* main event loop,should  run until g.running==0 */
+		event_loop();
+		closelog();
+	}else if(!g.background){
+		/* setup a signal handler */
+		for (c = 0; c < 32; c++)
+			signal (c, signals);
+		/* Initialize seccomp */      
+		init_seccomp();
+		g.running=1;
+		/* main event loop,should  run until g.running==0 */
+		event_loop();
+		closelog();
 		
 	}
-	
-	mc.sk=socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP);
-	if(mc.sk<1){
-		perror("Socket creation error,exiting.");
-		return -1;
-		}
-		
 
-	
-	mc.d.sin_family=AF_INET;
-	htonl(inet_aton(g.multicast_addr,&mc.d.sin_addr));
-	mc.d.sin_port=htons(g.port);
-	
-		
-	
-	drop_privs();
-	
-	multicast(g.NOTREADY,strlen(g.NOTREADY),&mc);
-	printf("Socket init done.\n");
-	
-	while(1){
-		usleep(100);
-		monitor(&n);
-		//usleep(10000);
-		if(n.mountme){
-			char pdev[256];
-			snprintf(pdev,255,"/dev/%s",n.partition_device);
-			if(mkdir(g.mountpath,0644)!=0 && errno!=EEXIST){
-				perror("Warning,mkdir error,mount might fail.");
-			}
-			if((mount(pdev,g.mountpath,g.fstype,MS_MGC_VAL,NULL))!=0){
-				printf("Mount params: %s %s %s ...\n",pdev,g.mountpath,g.fstype);
-				fflush(stdout);
-				perror("Error mounting the newly detected device");
-				
-				continue;
-			}else{
-				printf("Mount successful %s ---> %s\n",pdev,g.mountpath);
-				memset(nonce,0,NSZ);
-				if(poprand(&nonce[0],NSZ)==0){
-					char nfile[256];
-					snprintf(nfile,256,"%s/.nonce",g.mountpath);
-					FILE *nf=fopen(nfile,"rw+");
-					if(nf==NULL){
-						perror("Error opening nonce file.");
-						printf("File:%s\n",nfile);
-						if(n.sync && n.active){
-							printf("UNLOCKFAIL \n");
-							multicast(g.UNLOCKFAIL,strlen(g.UNLOCKFAIL),&mc);
-						
-					}
-					umount(g.mountpath);
-						continue;
-					}else if(!n.sync){
-						if(fwrite(nonce,1,NSZ,nf)!=NSZ){
-							perror("Error writing out nonce");
-							fclose(nf);
-							umount(g.mountpath);
-							continue;
-					}else{
-						memset(n.nonce,0,NSZ);
-						memcpy(n.nonce,nonce,NSZ);
-						n.sync=1;
-						printf("Nonce written,synced.\n");
-						multicast(g.LOCKREADY,strlen(g.LOCKREADY),&mc);
-						fflush(nf);
-						fclose(nf);
-						umount(g.mountpath);
-					}
-					
-				}else if(n.sync==1){
-					int ret=fread(nonce,1,NSZ,nf);
-					if( ret!= NSZ && n.active){
-						perror("error reading nonce from usb, True negative!");
-						printf("nonce read %i bytes\n",ret);
-						
-						multicast(g.UNLOCKFAIL,strlen(g.UNLOCKFAIL),&mc);
-						
-						fclose(nf);
-						umount(g.mountpath);
-						
-						continue;
-					}else{
-						if(memcmp(nonce,n.nonce,NSZ)==0){ // This is where we authenticate,no other logic should result in a True positive(successful authentication).
-							printf("True positive,unlock here!\n");
-							
-							multicast(g.UNLOCKREADY,strlen(g.UNLOCKREADY),&mc);
-							n.active=0;
-							n.sync=0;
-							memset(n.nonce,0,NSZ);
-							memset(nonce,0,NSZ);
-							if(fseek(nf,0,SEEK_SET)!=0){
-								perror("Warning! fseek on nonce failed post successful authentication,next nonce might fail.");
-							}
-							if(poprand(&nonce[0],NSZ)==0){
-								if(fwrite(nonce,1,NSZ,nf)!=NSZ){
-									perror("Error writing out nonce at post successful authentication.");
-									umount(g.mountpath);
-									fclose(nf);
-									continue;
-								}else{
-									memcpy(n.nonce,nonce,NSZ);
-									n.sync=1;
-									printf("Nonce written,nonce synced\n");
-									multicast(g.LOCKREADY,strlen(g.LOCKREADY),&mc);
-									fflush(nf);
-									fclose(nf);
-								}	
-							}else{
-								printf("RNG error post successful authentication.\n");
-								}
-						}else{
-							printf("True negative!\n");
-							multicast(g.UNLOCKFAIL,strlen(g.UNLOCKFAIL),&mc);
-						}
-					}
-					
-					
-				}
-			}else{
-				printf("RNG error.\n");
-				umount(g.mountpath);
-				continue;
-				}
-			umount(g.mountpath);
-			}
-		}else if(n.gone){
-			
-		if(n.sync && !(n.active)){
-			printf("LOCK\n");
-			n.active=1;
-			multicast(g.LOCK,strlen(g.LOCK),&mc);
-				}
-		}	
-	}
-	close(mc.sk);	
 return 0;
 }
 
