@@ -64,3 +64,9 @@ USBnonce 0.1a Usage:
 	-p <port>	 set the destination port number for UDP notifications.
 	-h 	 Display this usage info.
 ```
+
+#BUGS
+
+* When  a qemu VM is in full screen,it won't lock as a result of a USBNONCE LOCK event message.
+
+Will add more here as I find them.
