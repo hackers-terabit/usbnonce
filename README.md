@@ -1,9 +1,13 @@
-#USBnonce
-## *This is still in development,use at your own peril.*
+#USBNONCE
+## *While this application works as expected in testing,please test it on your system well before using it for anything serious.*
 
- This small C program is suppose to enable the usage of
+ This small C program is meant enable the usage of
  removable storage drives as a factor of authentication.
 
+ **TL;DR: it places random bytes on a usb drive,sends UDP event 
+ notification when the drive is plugged in and the bytes are verified (or fail verification).
+ Check out uslock as well, a slock fork that works with usbnonce **
+ 	
  At start-up it will await for a new drive to be plugged in.
  When a new drive with a usable partition and a file system matching
  the default of ext4 (or user specfied via -f flag) is detected,
