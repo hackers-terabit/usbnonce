@@ -6,10 +6,10 @@ include config.mk
 SRC = slock.c ${COMPATSRC}
 OBJ = ${SRC:.c=.o}
 
-all: options slock
+all: options uslock
 
 options:
-	@echo slock build options:
+	@echo uslock build options:
 	@echo "CFLAGS   = ${CFLAGS}"
 	@echo "LDFLAGS  = ${LDFLAGS}"
 	@echo "CC       = ${CC}"
@@ -24,7 +24,7 @@ config.h:
 	@echo creating $@ from config.def.h
 	@cp config.def.h $@
 
-slock: ${OBJ}
+uslock: ${OBJ}
 	@echo CC -o $@
 	@${CC} -o $@ ${OBJ} ${LDFLAGS}
 

@@ -529,7 +529,8 @@ main(int argc, char **argv) {
 				XFlush(locks[screen]->dpy);
 
 			}
-		
+			
+	
 			while(usblock){
 				
 				usblock=usbnonce(&usu);
@@ -556,6 +557,7 @@ main(int argc, char **argv) {
 			
 		}else{
 			wait(&status);
+			
 		}
 	}
 	

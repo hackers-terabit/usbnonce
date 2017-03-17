@@ -14,7 +14,7 @@ static const char *colorname[NUMCOLS] = {
 static const int failonclear = 1;
 
 /* message font */
-static const char *msgfont= "lucidasanstypewriter-24";
+static const char *msgfont= "lucidasanstypewriter-bold-24";
 
 /* IP address to liste on for USB nonce messages */
 static const char *usnip="127.0.0.1";

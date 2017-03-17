@@ -1,4 +1,4 @@
-/*  USBnonce 0.1a
+/*  USBnonce 0.1b
  * 
  * 	This small C program is suppose to enable the usage of
  *  removable storage drives as a factor of authentication.
@@ -75,7 +75,10 @@ struct shared{
 	char *fstype;			/* the fs of the removable drive */
 	char *multicast_addr; 	/* the IPv4 multicast address to send UDP event notification to */
 	char devp[12];			/* typically /dev , the path to the devfs mount path */
-
+	
+	char *lockcmd;			/* run this command when a LOCK notice is sent */
+	char *unlockcmd;		/* run this when UNLOCKREADY is sent */
+	
 	char * NOTREADY;		/* hasn't finished starting up yet */
 	char * LOCKREADY; 		/* nonce is synced, awaiting device removal to lock/activate */
 	char * LOCK;			/* device removed after LOCKREADY,system is good to lock */
@@ -115,13 +118,41 @@ struct mcast{
 	int sk;
 	struct sockaddr_in d;
 };
+/* funciton below copied from slock */
+#ifdef __linux__
+#include <fcntl.h>
+#include <linux/oom.h>
+
+static void
+dontkillme(void)
+{
+	FILE *f;
+	const char oomfile[] = "/proc/self/oom_score_adj";
+
+	if (!(f = fopen(oomfile, "w"))) {
+		if (errno == ENOENT)
+			return;
+		_exit(1);
+	}
+	fprintf(f, "%d", OOM_SCORE_ADJ_MIN);
+	if (fclose(f)) {
+		if (errno == EACCES)
+			_exit(1);
+		else
+			_exit(1);
+	}
+}
+#endif
 
 inline int poprand(char *buf,int sz){
 	int ret=0;
 	FILE *rf;
 	do{
 		rf=fopen("/dev/urandom","r");
-		if(rf==NULL){
+		if(rf
+		
+		
+		==NULL){
 			syslog(LOG_CRIT,"Unable to open /dev/urandom %s",strerror(errno));
 			return -1;
 		}
@@ -393,6 +424,8 @@ void usage(){
 				"\t-F \t Don't fork,run as a foreground process.\n"
 				"\t-d <ipv4addr>\t set the destination IPv4 address for UDP notifications\n"
 				"\t-p <port>\t set the destination port number for UDP notifications.\n"
+				"\t-l <lock command>\t The command to run when a LOCK event is triggered\n"
+				"\t-u <unlock command>\t The command to run when an UNLOCKREADY event is triggered\n"
 				"\t-h \t Display this usage info.\n"
 				,g.version);
 				_exit(1);
@@ -492,6 +525,7 @@ static int event_loop(){
 							multicast(g.UNLOCKREADY,strlen(g.UNLOCKREADY),&mc);
 							n.active=0;
 							n.sync=0;
+							if(system(g.unlockcmd)); 
 							memset(n.nonce,0,g.nsz);
 							memset(nonce,0,g.nsz);
 							if(fseek(nf,0,SEEK_SET)!=0){
@@ -535,6 +569,10 @@ static int event_loop(){
 			syslog(LOG_NOTICE,"LOCK\n");
 			n.active=1;
 			multicast(g.LOCK,strlen(g.LOCK),&mc);
+			/* yes ,system() has issues,however it's ok here,execve is too messed up.
+			 * intentionally ignoring the return value*,will replace with something more elegant when possible */
+			if(system(g.lockcmd)); 
+
 				}
 		}	
 	}
@@ -547,11 +585,13 @@ int main(int argc,char **argv){
 	int c=0;
 	
 	/*setup shared variables/globals..*/
-	g.version="USBnonce 0.1a";
+	g.version="USBnonce 0.1b";
 	g.mountpath="/tmp/usbnonce";
 	g.fstype="ext4";		
 	g.multicast_addr="127.0.0.1";
 	g.port=56789; 
+	g.lockcmd="./cmdlock.sh";
+	g.unlockcmd="./cmdunlock.sh";
 	
 	g.NOTREADY="NOTREADY";	
 	g.LOCKREADY="READYLOCK"; 	
@@ -565,7 +605,11 @@ int main(int argc,char **argv){
 	/* this was used to prevent buffered terminal output,not needed now but keeping it anyway*/
 	setvbuf(stdout,NULL,_IONBF,0);
 	
-	while((c=getopt(argc,argv,"m:f:d:p:Fh"))!=-1){
+#ifdef __linux__
+	dontkillme();
+#endif
+	
+	while((c=getopt(argc,argv,"m:f:d:p:l:u:Fh"))!=-1){
 			switch(c){
 				case 'm':
 					g.mountpath=optarg;
@@ -579,6 +623,12 @@ int main(int argc,char **argv){
 				case 'p':
 					g.port=atoi(optarg);
 					break;
+				case 'l':
+					g.lockcmd=optarg;
+					break;
+				case 'u':
+					g.unlockcmd=optarg;
+					break;				
 				case 'F':
 					g.background=0;
 					break;

@@ -1,4 +1,4 @@
-#USBNONCE
+# USBNONCE
 
 ## *While this application works as expected in testing,please test it on your system well before using it for anything serious.*
 
@@ -6,6 +6,7 @@
  removable storage drives as a factor of authentication.
 
  *TL;DR: it places random bytes on a usb drive,sends UDP event notification when the drive is plugged in and the bytes are verified (or fail verification).*
+ *it will also run specified commands when the synced usb is removed and when it's plugged in again*
  *Check out uslock as well, a slock fork that works with usbnonce*
  	
  At start-up it will await for a new drive to be plugged in.
@@ -48,11 +49,16 @@ If you plan on using this, be aware of some security considerations:
 		
 * Lastly, udev notifications aren't all that reliable,so plugging in/out a few times might be needed.
 
+* There are example lock/unlock scripts(cmdlock.sh and cmdunlock.sh),if you decide to use them and enable suspension of all bash processes and X,
+  Then be sure to start usbnonce from your init script,if you start it from a bash shell,suspending all bash processes will suspend usbnonce too,
+  leaving you the only option of a hard reset of the system. 
+  
 As an example client,The uslock/ directory contains a heavily modified slock(http://tools.suckless.org/slock ) that can be used with usbnonce.
 Simply run both applications,insert a usb,when removed it should lock the screen. It will require the same removable 
 drive to be re-inserted before you can type in your credentials for unlocking the screen. 
 
-#Usage
+# Usage
+
 
 ```		
 USBnonce 0.1a Usage:
@@ -65,7 +71,8 @@ USBnonce 0.1a Usage:
 	-h 	 Display this usage info.
 ```
 
-#BUGS
+# BUGS
+
 
 * When  a qemu VM is in full screen,it won't lock as a result of a USBNONCE LOCK event message.
 
