@@ -154,6 +154,10 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 	running = 1;
 	failure = 0;
 	oldc = INIT;
+	
+	memset(passwd,0,256);
+	memset(buf,0,32);
+	
 	XGetWindowAttributes(dpy,DefaultRootWindow(dpy),&xa);
 
 	snprintf(message,64,"USB NONCE IS VERIFIED. ENTER YOUR LOGIN PASSWORD TO UNLOCK.");
@@ -191,6 +195,8 @@ readpw(Display *dpy, struct xrandr *rr, struct lock **locks, int nscreens,
 					++fails;
 				}
 				explicit_bzero(&passwd, sizeof(passwd));
+				memset(passwd,0,256);
+				memset(buf,0,32);
 				len = 0;
 				break;
 			case XK_Escape:

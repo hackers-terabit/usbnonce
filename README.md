@@ -78,5 +78,5 @@ USBnonce 0.1b Usage:
 
 
 * When  a qemu VM is in full screen,it won't lock as a result of a USBNONCE LOCK event message.
-
+* sometimes(not always) after processes are suspended in cmdlock.sh and bad pw is entered,when unlocking it won't take a legitimate password(workaround is to kill it via separate tty since everything else should be unsuspended then)
 Will add more here as I find them.
