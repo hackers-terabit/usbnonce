@@ -6,7 +6,7 @@
  removable storage drives as a factor of authentication.
 
  *TL;DR: it places random bytes on a usb drive,sends UDP event notification when the drive is plugged in and the bytes are verified (or fail verification).*
- *it will also run specified commands when the synced usb is removed and when it's plugged in again*
+ *it will also run specified commands when the synced usb is removed and when it's plugged in again.*
  *Check out uslock as well, a slock fork that works with usbnonce*
  	
  At start-up it will await for a new drive to be plugged in.
@@ -61,14 +61,17 @@ drive to be re-inserted before you can type in your credentials for unlocking th
 
 
 ```		
-USBnonce 0.1a Usage:
-
+USBnonce 0.1b Usage:
 	usbnonce [-mfdph]
 	-m <mountpoint>	 set the filesystem mount point that will be used to temporarily mount the removable drive.
 	-f <filesystem>	 set the filesystem the removable drive is expected to use.
+	-F 	 Don't fork,run as a foreground process.
 	-d <ipv4addr>	 set the destination IPv4 address for UDP notifications
 	-p <port>	 set the destination port number for UDP notifications.
+	-l <lock command>	 The command to run when a LOCK event is triggered
+	-u <unlock command>	 The command to run when an UNLOCKREADY event is triggered
 	-h 	 Display this usage info.
+
 ```
 
 # BUGS
