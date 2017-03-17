@@ -33,7 +33,7 @@
 
 char *argv0;
 char message[64];
-uint16_t fails;
+int fails;
 
 enum {
 	INIT,
